@@ -511,4 +511,5 @@ if st.session_state.user:
                 st.success("Study plan progress reset successfully!")
                 st.rerun()  # Refresh the page
 else:
-            st.warning("Please log in or register to use the app.")
+            st.warning("Please log in or register to use the app.
+                        Check the Authentication left side")

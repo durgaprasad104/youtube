@@ -1,0 +1,5 @@
+streamlit
+fpdf
+google-api-python-client
+firebase-admin
+google-cloud-firestore

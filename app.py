@@ -20,8 +20,8 @@ db = firestore.client()
 # -------------------------------
 # Hardcoded API Keys (for testing only)
 # -------------------------------
-YOUTUBE_API_KEY = ""
-GEMINI_API_KEY = ""
+YOUTUBE_API_KEY = "AIzaSyBBbpxCpuwp7MJYcDmgMCkkO6j3yhtsG7U"
+GEMINI_API_KEY = "AIzaSyBDkfFS2B_usA3ie2aUGLIxyu-OoKbnyYk"
 
 # -------------------------------
 # Helper Functions

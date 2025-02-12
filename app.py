@@ -5,23 +5,28 @@ from fpdf import FPDF
 from googleapiclient.discovery import build
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
-from google.cloud.firestore_v1 import DELETE_FIELD
+from datetime import datetime, timezone
+import google.generativeai as genai  # For Gemini API
+from youtube_transcript_api import YouTubeTranscriptApi  # For fetching transcripts
 
 # -------------------------------
 # Firebase Initialization
 # -------------------------------
 if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase-credentials.json.json")  # Replace with your Firebase service account key path
+    cred = credentials.Certificate("firebase-credentials.json.json")  # Replace with your Firebase credentials file
     firebase_admin.initialize_app(cred)
 
 # Initialize Firestore
 db = firestore.client()
 
 # -------------------------------
-# Hardcoded API Keys (for testing only)
+# API Keys
 # -------------------------------
-YOUTUBE_API_KEY = "AIzaSyBBbpxCpuwp7MJYcDmgMCkkO6j3yhtsG7U"
-GEMINI_API_KEY = "AIzaSyBDkfFS2B_usA3ie2aUGLIxyu-OoKbnyYk"
+YOUTUBE_API_KEY = "AIzaSyBBbpxCpuwp7MJYcDmgMCkkO6j3yhtsG7U"  # Replace with your YouTube API key
+GEMINI_API_KEY = "AIzaSyDAJ33Cjo4mDSEkn5IRc_LTTEoIGeLqD5I"  # Replace with your Gemini API key
+
+# Initialize Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
 
 # -------------------------------
 # Helper Functions
@@ -141,87 +146,67 @@ def fetch_playlist_details_youtube(playlist_id: str, youtube_api_key: str) -> li
         st.error(f"Error fetching playlist details: {e}")
         return None
 
-def seconds_to_hours(seconds: int) -> float:
+def fetch_transcript(video_id: str) -> str:
     """
-    Convert seconds to hours (rounded to 2 decimals).
+    Fetch the transcript for a YouTube video using YouTubeTranscriptApi.
     """
-    return round(seconds / 3600, 2)
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return " ".join([entry['text'] for entry in transcript])
+    except Exception as e:
+        st.error(f"Error fetching transcript: {e}")
+        return None
 
-def generate_daily_schedule(videos: list, total_days: int) -> dict:
+def generate_questions_and_summary(transcript: str) -> dict:
     """
-    Divide the list of videos evenly among the given number of days.
-    Returns a dictionary mapping day number to the list of video details.
+    Generate a summary, questions, and answers using the Gemini API.
     """
-    total_videos = len(videos)
-    videos_per_day = math.ceil(total_videos / total_days)
-    schedule = {}
-    for day in range(1, total_days + 1):
-        start_index = (day - 1) * videos_per_day
-        schedule[day] = videos[start_index:start_index + videos_per_day]
-    return schedule
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        
+        # Generate summary
+        summary_prompt = f"Summarize the following transcript in 100 words:\n{transcript}"
+        summary = model.generate_content(summary_prompt).text
+        
+        # Generate questions and answers
+        qa_prompt = f"Generate 3 questions and answers based on the following transcript:\n{transcript}"
+        qa_response = model.generate_content(qa_prompt).text
+        
+        return {
+            "summary": summary,
+            "qa": qa_response
+        }
+    except Exception as e:
+        st.error(f"Error generating questions and summary: {e}")
+        return None
 
-def simulate_transcript(video: dict) -> str:
+def create_pdf_for_day(day: int, videos: list, transcripts_data: list) -> str:
     """
-    Simulate a transcript for the video. (Replace with a real transcript method as needed.)
-    """
-    return f"This is a simulated transcript for '{video['title']}'. It covers the main points and key details."
-
-def generate_questions_for_video_gemini(video: dict, gemini_api_key: str) -> str:
-    """
-    Simulate generating quiz questions using the Gemini API.
-    (Replace with an actual API call if available.)
-    """
-    transcript = simulate_transcript(video)
-    simulated_questions = (
-        f"1. What is the main topic of '{video['title']}'?\n"
-        f"2. Name one key detail mentioned in the video.\n"
-        f"3. How can you apply the content of '{video['title']}' in practice?"
-    )
-    return simulated_questions
-
-def create_pdf_for_day(day: int, video_list: list, questions_dict: dict) -> str:
-    """
-    Generate a PDF file for the specified day containing the video details and quiz questions.
-    Returns the filename of the generated PDF.
+    Generate a PDF file for the specified day containing the video details, transcripts, summaries, and Q&A.
     """
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, f"Daily Study Material - Day {day}", ln=True, align="C")
     pdf.set_font("Arial", "", 12)
-    pdf.ln(10)
+    
+    # Add videos
     pdf.cell(0, 10, "Videos for Today:", ln=True)
-    for idx, video in enumerate(video_list, start=1):
-        duration_hours = seconds_to_hours(video['length'])
+    for idx, video in enumerate(videos, 1):
+        duration_hours = round(video['length'] / 3600, 2)
         pdf.cell(0, 10, f"{idx}. {video['title']} ({duration_hours} hours)", ln=True)
-    pdf.ln(10)
-    pdf.cell(0, 10, "Quiz Questions:", ln=True)
-    for idx, video in enumerate(video_list, start=1):
-        pdf.multi_cell(0, 10, f"Video {idx}: {video['title']}")
-        pdf.multi_cell(0, 10, questions_dict.get(video['url'], "No questions generated."))
-        pdf.ln(5)
+    
+    # Add transcripts, summaries, and Q&A
+    for idx, data in enumerate(transcripts_data, 1):
+        pdf.ln(10)
+        pdf.cell(0, 10, f"Video {idx}: {videos[idx-1]['title']}", ln=True)
+        pdf.multi_cell(0, 10, f"Transcript:\n{data['transcript']}")
+        pdf.multi_cell(0, 10, f"Summary:\n{data['summary']}")
+        pdf.multi_cell(0, 10, f"Questions & Answers:\n{data['qa']}")
+    
     pdf_filename = f"daily_study_day_{day}.pdf"
     pdf.output(pdf_filename)
     return pdf_filename
-
-# -------------------------------
-# Progress Tracking Functions
-# -------------------------------
-
-def show_progress_sidebar():
-    """Display a progress tracker in the sidebar."""
-    if st.session_state.saved_schedule:
-        with st.sidebar:
-            st.subheader("Your Progress")
-            days_total = len(st.session_state.saved_schedule)
-            cols = st.columns(days_total)
-            for day in range(1, days_total + 1):
-                with cols[day - 1]:
-                    if day in st.session_state.viewed_days:
-                        st.markdown("🟢")  # Completed day
-                    else:
-                        st.markdown("⚪")  # Pending day
-                    st.caption(f"Day {day}")
 
 # -------------------------------
 # Firebase Authentication Functions
@@ -233,12 +218,13 @@ def register_user(email: str, password: str):
     """
     try:
         user = auth.create_user(email=email, password=password)
-        # Add registration date to Firestore
         user_ref = db.collection('users').document(user.uid)
         user_ref.set({
             'registration_date': firestore.SERVER_TIMESTAMP,
             'saved_schedule': {},
-            'viewed_days': []
+            'viewed_days': [],
+            'watched_videos': {},
+            'start_date': None
         })
         st.success("User registered successfully! Please log in.")
         return user
@@ -253,7 +239,7 @@ def login_user(email: str, password: str):
     try:
         user = auth.get_user_by_email(email)
         st.session_state.user = user
-        load_user_data()  # Load saved data after login
+        load_user_data()
         st.success("Logged in successfully!")
         return user
     except Exception as e:
@@ -266,20 +252,13 @@ def save_user_data():
     """
     if st.session_state.user:
         user_ref = db.collection('users').document(st.session_state.user.uid)
-        
-        # Handle None case for saved_schedule
-        saved_schedule_state = st.session_state.get('saved_schedule') or {}
-        
-        # Convert schedule keys to strings for Firestore compatibility
-        saved_schedule = {
-            str(day): videos 
-            for day, videos in saved_schedule_state.items()
+        update_data = {
+            'saved_schedule': {str(k): v for k, v in st.session_state.saved_schedule.items()},
+            'viewed_days': list(st.session_state.viewed_days),
+            'watched_videos': st.session_state.watched_videos,
+            'start_date': st.session_state.start_date
         }
-        
-        user_ref.set({
-            'saved_schedule': saved_schedule,
-            'viewed_days': list(st.session_state.get('viewed_days', set()))
-        }, merge=True)
+        user_ref.set(update_data, merge=True)
 
 def load_user_data():
     """
@@ -290,15 +269,45 @@ def load_user_data():
         doc = user_ref.get()
         if doc.exists:
             data = doc.to_dict()
-            
-            # Convert string keys back to integers
-            loaded_schedule = data.get('saved_schedule', {})
-            st.session_state.saved_schedule = {
-                int(day): videos 
-                for day, videos in loaded_schedule.items()
-            }
-            
+            st.session_state.saved_schedule = {int(k): v for k, v in data.get('saved_schedule', {}).items()}
             st.session_state.viewed_days = set(data.get('viewed_days', []))
+            st.session_state.watched_videos = data.get('watched_videos', {})
+            st.session_state.start_date = data.get('start_date')
+
+# -------------------------------
+# Progress Tracking Functions
+# -------------------------------
+
+def calculate_current_day():
+    """
+    Calculate the current day based on the study plan's start date.
+    """
+    if not st.session_state.start_date:
+        return 1
+    now = datetime.now(timezone.utc)
+    delta = now - st.session_state.start_date
+    current_day = delta.days + 1  # Add 1 to make day 1 the start date
+    return current_day
+
+def show_progress_sidebar():
+    """
+    Display a progress tracker in the sidebar.
+    """
+    if st.session_state.saved_schedule:
+        with st.sidebar:
+            st.subheader("Your Progress")
+            total_days = len(st.session_state.saved_schedule)
+            current_day = calculate_current_day()
+            cols = st.columns(total_days)
+            for day in range(1, total_days + 1):
+                with cols[day - 1]:
+                    if day > current_day:
+                        st.markdown("⚫")  # Future day (locked)
+                    elif day in st.session_state.viewed_days:
+                        st.markdown("🟢")  # Completed day
+                    else:
+                        st.markdown("⚪")  # Current/Pending day
+                    st.caption(f"Day {day}")
 
 # -------------------------------
 # Streamlit App
@@ -309,6 +318,10 @@ if 'saved_schedule' not in st.session_state:
     st.session_state.saved_schedule = None
 if 'viewed_days' not in st.session_state:
     st.session_state.viewed_days = set()
+if 'watched_videos' not in st.session_state:
+    st.session_state.watched_videos = {}
+if 'start_date' not in st.session_state:
+    st.session_state.start_date = None
 if 'user' not in st.session_state:
     st.session_state.user = None
 
@@ -329,9 +342,7 @@ if not st.session_state.user:
 else:
     st.sidebar.success(f"Logged in as {st.session_state.user.email}")
     if st.sidebar.button("Logout"):
-        st.session_state.user = None
-        st.session_state.saved_schedule = None
-        st.session_state.viewed_days = set()
+        st.session_state.clear()
         st.rerun()
 
 # Main App Functionality
@@ -339,14 +350,13 @@ if st.session_state.user:
     # Add navigation radio
     app_section = st.radio(
         "Navigation",
-        ["Study Plan", "About Me"],
+        ["Study Plan", "Progress"],
         horizontal=True
     )
     
     if app_section == "Study Plan":
         st.title("YouTube Playlist Daily Study Planner")
-        st.markdown("This app uses YouTube Data API v3 to fetch video details and simulates a Gemini API to generate quiz questions.")
-
+        
         # --- Step 1: Input YouTube URL and Fetch Videos ---
         url = st.text_input("Paste your YouTube video or playlist URL here:")
 
@@ -358,7 +368,7 @@ if st.session_state.user:
                 if videos:
                     st.success(f"Found {len(videos)} videos in this playlist.")
                     total_seconds = sum(video['length'] for video in videos)
-                    st.write(f"Total estimated duration: {seconds_to_hours(total_seconds)} hours.")
+                    st.write(f"Total estimated duration: {round(total_seconds / 3600, 2)} hours.")
                     st.write("First few videos:")
                     for video in videos[:5]:
                         st.write(f"- {video['title']}")
@@ -372,7 +382,7 @@ if st.session_state.user:
                     video = fetch_video_details_youtube(video_id, YOUTUBE_API_KEY)
                     if video:
                         st.success(f"Video found: {video['title']}")
-                        st.write(f"Duration: {seconds_to_hours(video['length'])} hours.")
+                        st.write(f"Duration: {round(video['length'] / 3600, 2)} hours.")
                         st.session_state.videos = [video]
                     else:
                         st.error("Could not fetch video details. Please check the URL and API key.")
@@ -385,89 +395,55 @@ if st.session_state.user:
             total_videos = len(st.session_state.videos)
             days = st.number_input("Enter the number of days to complete these videos:", 
                                    min_value=1, max_value=100, value=3, step=1)
-            time_slot = st.selectbox("Select your preferred daily time slot:",
-                                     options=["Morning", "Afternoon", "Evening", "Night"])
-            videos_per_day = math.ceil(total_videos / days)
-            st.write(f"Approximately {videos_per_day} videos per day will be scheduled.")
-            schedule = generate_daily_schedule(st.session_state.videos, days)
-            st.write("### Your Daily Schedule Preview:")
-            for day_num in schedule:
-                st.write(f"Day {day_num}:")
-                for vid in schedule[day_num]:
-                    st.write(f"- {vid['title']}")
             if st.button("Save Study Plan"):
-                st.session_state.saved_schedule = schedule
+                st.session_state.saved_schedule = generate_daily_schedule(st.session_state.videos, days)
+                st.session_state.start_date = datetime.now(timezone.utc)
                 st.session_state.viewed_days = set()
-                save_user_data()  # Save the study plan to Firestore
+                st.session_state.watched_videos = {}
+                save_user_data()
                 st.success("Study plan saved for your account!")
 
-        # --- Progress Tracker ---
+        # --- Step 3: Display Saved Daily Videos & Track Progress ---
         if st.session_state.saved_schedule:
             show_progress_sidebar()
 
-            # --- Step 3: Display Saved Daily Videos & Track Progress ---
-            st.header("Your Saved Daily Videos")
-            view_day = st.number_input("Select a day to view today's videos:", 
-                                       min_value=1, 
-                                       max_value=len(st.session_state.saved_schedule), 
-                                       value=1, 
-                                       step=1)
+            # Calculate current day
+            current_day = calculate_current_day()
+            day_videos = st.session_state.saved_schedule.get(current_day, [])
             
-            # Track viewed days
-            if view_day not in st.session_state.viewed_days:
-                st.session_state.viewed_days.add(view_day)
-                save_user_data()  # Save progress to Firestore
-            
-            # Display videos for selected day
-            day_videos = st.session_state.saved_schedule.get(view_day, [])
             if day_videos:
-                st.subheader(f"Videos for Day {view_day}:")
-                for video in day_videos:
-                    st.markdown(f"### {video['title']}")
-                    st.video(video["url"])
-                    with st.expander("Show Transcript"):
-                        transcript = simulate_transcript(video)
-                        st.write(transcript)
+                st.header(f"Day {current_day} Videos")
+                watched_videos = st.session_state.watched_videos.get(str(current_day), [])
+                
+                for idx, video in enumerate(day_videos):
+                    if idx < len(watched_videos):
+                        st.video(video['url'])
+                        st.write(f"✅ Watched: {video['title']}")
+                    elif idx == len(watched_videos):
+                        st.video(video['url'])
+                        st.write(video['title'])
+                        if st.button(f"Mark Video {idx + 1} as Watched", key=f"watch_{current_day}_{idx}"):
+                            st.session_state.watched_videos.setdefault(str(current_day), []).append(idx)
+                            save_user_data()
+                            st.rerun()
+                        break
+                    else:
+                        break
+
+                if len(watched_videos) == len(day_videos):
+                    st.success("You've completed all videos for today!")
+
             else:
-                st.info("No videos scheduled for this day.")
+                st.info("No videos scheduled for today.")
 
-            # --- Step 4: PDF Generation ---
-
-            # --- Step 4: PDF Generation ---
-            st.header("Daily PDF Generation")
-            st.write("Select a day and click the button to generate a PDF with that day's study materials and quiz questions.")
-            selected_day = st.number_input("Select day number:", 
-                                        min_value=1, 
-                                        max_value=len(st.session_state.saved_schedule), 
-                                        value=1, 
-                                        step=1)
-            if st.button("Generate Daily PDF"):
-                day_videos = st.session_state.saved_schedule.get(selected_day, [])
-                if not day_videos:
-                    st.error("No videos scheduled for the selected day.")
-                else:
-                    questions_dict = {}
-                    with st.spinner("Generating quiz questions..."):
-                        for video in day_videos:
-                            questions = generate_questions_for_video_gemini(video, GEMINI_API_KEY)
-                            questions_dict[video['url']] = questions
-                    pdf_filename = create_pdf_for_day(selected_day, day_videos, questions_dict)
-                    st.success(f"PDF generated: {pdf_filename}")
-                    with open(pdf_filename, "rb") as pdf_file:
-                        st.download_button(
-                            label="Download Daily PDF",
-                            data=pdf_file,
-                            file_name=pdf_filename,
-                            mime="application/pdf"
-                        )
-        
-    elif app_section == "About Me":
+    # Modify the "Progress" section in the Streamlit App
+    elif app_section == "Progress":
         # --- New About Section ---
         st.header("👤 User Profile")
         
         # Basic user info
         st.subheader("Account Details")
-        st.write(f"*Email:* {st.session_state.user.email}")
+        st.write(f"Email: {st.session_state.user.email}")
         
         # Add registration date (requires Firestore storage)
         try:
@@ -475,7 +451,7 @@ if st.session_state.user:
             doc = user_ref.get()
             if doc.exists:
                 user_data = doc.to_dict()
-                st.write(f"*Registration Date:* {user_data.get('registration_date', 'Not available')}")
+                st.write(f"Registration Date: {user_data.get('registration_date', 'Not available')}")
         except Exception as e:
             st.error(f"Error loading profile data: {e}")
         
@@ -484,8 +460,8 @@ if st.session_state.user:
         if st.session_state.saved_schedule:
             total_days = len(st.session_state.saved_schedule)
             completed_days = len(st.session_state.viewed_days)
-            st.write(f"*Total Study Days:* {total_days}")
-            st.write(f"*Completed Days:* {completed_days}")
+            st.write(f"Total Study Days: {total_days}")
+            st.write(f"Completed Days: {completed_days}")
             st.progress(completed_days / total_days)
         else:
             st.info("No active study plan found")
@@ -510,5 +486,47 @@ if st.session_state.user:
                 save_user_data()  # Save changes to Firestore
                 st.success("Study plan progress reset successfully!")
                 st.rerun()  # Refresh the page
+        show_progress_sidebar()
+        st.header("Daily PDF Generation")
+        if st.session_state.saved_schedule:
+            current_day = calculate_current_day()
+            if st.button("Generate Today's PDF"):
+                day_videos = st.session_state.saved_schedule.get(current_day, [])
+                if day_videos:
+                    # Fetch transcripts and generate summaries/Q&A
+                    transcripts_data = []
+                    for video in day_videos:
+                        # Extract video ID from URL
+                        video_id = video['url'].split('v=')[-1]
+                        
+                        # Fetch transcript
+                        transcript = fetch_transcript(video_id)
+                        
+                        if transcript:
+                            # Generate summary and Q&A
+                            generated_data = generate_questions_and_summary(transcript)
+                            transcripts_data.append({
+                                "transcript": transcript,
+                                "summary": generated_data["summary"],
+                                "qa": generated_data["qa"]
+                            })
+                        else:
+                            transcripts_data.append({
+                                "transcript": "Transcript not available",
+                                "summary": "Summary not available",
+                                "qa": "Q&A not available"
+                            })
+                    
+                    # Generate PDF with all data
+                    pdf_filename = create_pdf_for_day(current_day, day_videos, transcripts_data)
+                    with open(pdf_filename, "rb") as pdf_file:
+                        st.download_button(
+                            label="Download Today's PDF",
+                            data=pdf_file,
+                            file_name=pdf_filename,
+                            mime="application/pdf"
+                        )
+                else:
+                    st.error("No videos scheduled for today.")
 else:
-            st.warning("Please log in or register to use the app, Check the Authentication left side")
+    st.warning("Please log in or register to use the app.")

@@ -308,6 +308,22 @@ def show_progress_sidebar():
                     else:
                         st.markdown("⚪")  # Current/Pending day
                     st.caption(f"Day {day}")
+def generate_daily_schedule(videos, num_days):
+    """
+    Distributes videos across the given number of days.
+    """
+    if not videos or num_days <= 0:
+        return {}
+
+    schedule = {}
+    videos_per_day = math.ceil(len(videos) / num_days)
+
+    for i in range(num_days):
+        start_idx = i * videos_per_day
+        end_idx = start_idx + videos_per_day
+        schedule[i + 1] = videos[start_idx:end_idx]  # Day starts from 1
+
+    return schedule
 
 # -------------------------------
 # Streamlit App
@@ -315,7 +331,7 @@ def show_progress_sidebar():
 
 # Initialize session state variables
 if 'saved_schedule' not in st.session_state:
-    st.session_state.saved_schedule = None
+    st.session_state.saved_schedule = {}
 if 'viewed_days' not in st.session_state:
     st.session_state.viewed_days = set()
 if 'watched_videos' not in st.session_state:
@@ -476,7 +492,8 @@ if st.session_state.user:
         
         if st.button("Confirm Action"):
             if action == "Delete Study Plan":
-                st.session_state.saved_schedule = None
+                st.session_state.saved_schedule = {}
+
                 st.session_state.viewed_days = set()
                 save_user_data()  # Save changes to Firestore
                 st.success("Study plan deleted successfully!")

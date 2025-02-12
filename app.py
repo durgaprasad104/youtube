@@ -529,4 +529,4 @@ if st.session_state.user:
                 else:
                     st.error("No videos scheduled for today.")
 else:
-    st.warning("Please log in or register to use the app.")
+    st.warning("Please log in or register to use the app.Check < for Authentication")

@@ -5,3 +5,4 @@ firebase-admin
 google-cloud-firestore
 google-cloud-storage
 youtube-transcript-api
+google-generativeai

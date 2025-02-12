@@ -6,7 +6,7 @@ from googleapiclient.discovery import build
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from datetime import datetime, timezone
-import google.generativeai as genai  # For Gemini API
+  # For Gemini API
 from youtube_transcript_api import YouTubeTranscriptApi  # For fetching transcripts
 
 # -------------------------------

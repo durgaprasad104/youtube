@@ -8,6 +8,10 @@ from firebase_admin import credentials, auth, firestore
 from datetime import datetime, timezone
 import google.generativeai as genai  # For Gemini API
 from youtube_transcript_api import YouTubeTranscriptApi  # For fetching transcripts
+import pytz
+from datetime import datetime
+import time
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # -------------------------------
 # Firebase Initialization
@@ -23,7 +27,7 @@ db = firestore.client()
 # API Keys
 # -------------------------------
 YOUTUBE_API_KEY = "AIzaSyBBbpxCpuwp7MJYcDmgMCkkO6j3yhtsG7U"  # Replace with your YouTube API key
-GEMINI_API_KEY = "AIzaSyDAJ33Cjo4mDSEkn5IRc_LTTEoIGeLqD5I"  # Replace with your Gemini API key
+GEMINI_API_KEY = "AIzaSyATDiUoEH3ckyy6fw-pRZD63P1e-dxGivI"  # Replace with your Gemini API key
 
 # Initialize Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
@@ -31,6 +35,13 @@ genai.configure(api_key=GEMINI_API_KEY)
 # -------------------------------
 # Helper Functions
 # -------------------------------
+def convert_utc_to_ist(utc_time):
+    """
+    Convert UTC time string to IST.
+    """
+    local_tz = pytz.timezone("Asia/Kolkata")
+    local_time = utc_time.astimezone(local_tz)
+    return local_time
 
 def extract_video_id(url: str) -> str:
     """
@@ -156,7 +167,7 @@ def fetch_transcript(video_id: str) -> str:
     except Exception as e:
         st.error(f"Error fetching transcript: {e}")
         return None
-
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def generate_questions_and_summary(transcript: str) -> dict:
     """
     Generate a summary, questions, and answers using the Gemini API.
@@ -166,19 +177,21 @@ def generate_questions_and_summary(transcript: str) -> dict:
         
         # Generate summary
         summary_prompt = f"Summarize the following transcript in 100 words:\n{transcript}"
-        summary = model.generate_content(summary_prompt).text
+        summary_response = model.generate_content(summary_prompt)
+        summary = summary_response.text if summary_response else "Summary generation failed"
         
         # Generate questions and answers
         qa_prompt = f"Generate 3 questions and answers based on the following transcript:\n{transcript}"
-        qa_response = model.generate_content(qa_prompt).text
+        qa_response = model.generate_content(qa_prompt)
+        qa = qa_response.text if qa_response else "Q&A generation failed"
         
         return {
             "summary": summary,
-            "qa": qa_response
+            "qa": qa
         }
     except Exception as e:
         st.error(f"Error generating questions and summary: {e}")
-        return None
+        raise # Return structured data even on failure
 
 def create_pdf_for_day(day: int, videos: list, transcripts_data: list) -> str:
     """
@@ -186,23 +199,59 @@ def create_pdf_for_day(day: int, videos: list, transcripts_data: list) -> str:
     """
     pdf = FPDF()
     pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Set font for the entire document
+    pdf.set_font("Arial", size=12)  # Corrected font setting
+    
+    # Title
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, f"Daily Study Material - Day {day}", ln=True, align="C")
-    pdf.set_font("Arial", "", 12)
+    pdf.ln(10)
     
-    # Add videos
+    # Videos section
+    pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, "Videos for Today:", ln=True)
+    pdf.set_font("Arial", size=12)  # Corrected font setting
+    
     for idx, video in enumerate(videos, 1):
         duration_hours = round(video['length'] / 3600, 2)
-        pdf.cell(0, 10, f"{idx}. {video['title']} ({duration_hours} hours)", ln=True)
+        pdf.multi_cell(0, 10, f"{idx}. {video['title']} ({duration_hours} hours)")
+        pdf.ln(2)
     
-    # Add transcripts, summaries, and Q&A
+    # Add space between sections
+    pdf.ln(10)
+    
+    # Transcripts, summaries, and Q&A
     for idx, data in enumerate(transcripts_data, 1):
-        pdf.ln(10)
+        # Video header
+        pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, f"Video {idx}: {videos[idx-1]['title']}", ln=True)
-        pdf.multi_cell(0, 10, f"Transcript:\n{data['transcript']}")
-        pdf.multi_cell(0, 10, f"Summary:\n{data['summary']}")
-        pdf.multi_cell(0, 10, f"Questions & Answers:\n{data['qa']}")
+        pdf.ln(5)
+        
+        # Full transcript
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, "Transcript:", ln=True)
+        pdf.set_font("Arial", size=10)  # Corrected font setting
+        pdf.multi_cell(0, 5, data['transcript'])
+        pdf.ln(5)
+        
+        # Summary
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, "Summary:", ln=True)
+        pdf.set_font("Arial", size=10)  # Corrected font setting
+        pdf.multi_cell(0, 5, data.get('summary', 'Summary not available'))
+        pdf.ln(5)
+        
+        # Q&A
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, "Questions & Answers:", ln=True)
+        pdf.set_font("Arial", size=10)  # Corrected font setting
+        pdf.multi_cell(0, 5, data.get('qa', 'Q&A not available'))
+        
+        # Add page break if not last item
+        if idx != len(transcripts_data):
+            pdf.add_page()
     
     pdf_filename = f"daily_study_day_{day}.pdf"
     pdf.output(pdf_filename)
@@ -218,9 +267,11 @@ def register_user(email: str, password: str):
     """
     try:
         user = auth.create_user(email=email, password=password)
+        current_utc_time = datetime.now(timezone.utc)
+        current_ist_time = convert_utc_to_ist(current_utc_time)
         user_ref = db.collection('users').document(user.uid)
         user_ref.set({
-            'registration_date': firestore.SERVER_TIMESTAMP,
+            'registration_date': current_ist_time,
             'saved_schedule': {},
             'viewed_days': [],
             'watched_videos': {},
@@ -411,6 +462,7 @@ if st.session_state.user:
             total_videos = len(st.session_state.videos)
             days = st.number_input("Enter the number of days to complete these videos:", 
                                    min_value=1, max_value=100, value=3, step=1)
+            time_slot = st.selectbox("Select your preferred daily time slot:",options=["Morning", "Afternoon", "Evening", "Night"])
             if st.button("Save Study Plan"):
                 st.session_state.saved_schedule = generate_daily_schedule(st.session_state.videos, days)
                 st.session_state.start_date = datetime.now(timezone.utc)
@@ -467,7 +519,16 @@ if st.session_state.user:
             doc = user_ref.get()
             if doc.exists:
                 user_data = doc.to_dict()
-                st.write(f"Registration Date: {user_data.get('registration_date', 'Not available')}")
+                registration_date_utc = user_data.get('registration_date', 'Not available')
+                if registration_date_utc != 'Not available':
+                # Convert Firestore timestamp to datetime if necessary
+                    registration_date_utc = registration_date_utc.replace(tzinfo=timezone.utc)
+                    # Convert UTC registration date to IST
+                    registration_date_ist = convert_utc_to_ist(registration_date_utc)
+                    registration_date_str = registration_date_ist.strftime("%Y-%m-%d %H:%M:%S %Z")
+                else:
+                    registration_date_str = registration_date_utc
+                st.write(f"Registration Date: {registration_date_str}")
         except Exception as e:
             st.error(f"Error loading profile data: {e}")
         
@@ -514,10 +575,8 @@ if st.session_state.user:
                     transcripts_data = []
                     for video in day_videos:
                         # Extract video ID from URL
-                        video_id = video['url'].split('v=')[-1]
-                        
-                        # Fetch transcript
-                        transcript = fetch_transcript(video_id)
+                        video_id = extract_video_id(video['url'])
+                        transcript = fetch_transcript(video_id) or "Transcript not available"
                         
                         if transcript:
                             # Generate summary and Q&A

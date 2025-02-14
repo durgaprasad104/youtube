@@ -8,10 +8,12 @@ from firebase_admin import credentials, auth, firestore
 from datetime import datetime, timezone
 import google.generativeai as genai  # For Gemini API
 from youtube_transcript_api import YouTubeTranscriptApi  # For fetching transcripts
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptAvailable
 import pytz
 from datetime import datetime
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential
+from googletrans import Translator
 
 # -------------------------------
 # Firebase Initialization
@@ -88,6 +90,17 @@ def iso8601_duration_to_seconds(duration: str) -> int:
             int(parts.get('minutes') or 0) * 60 + \
             int(parts.get('seconds') or 0)
     return total
+def translate_text(text: str, src_lang: str, dest_lang: str = 'en') -> str:
+    """
+    Translate text from source language to destination language.
+    """
+    try:
+        translator = Translator()
+        translation = translator.translate(text, src=src_lang, dest=dest_lang)
+        return translation.text
+    except Exception as e:
+        st.error(f"Error translating text: {e}")
+        return text  # Return original text if translation fails
 
 def fetch_video_details_youtube(video_id: str, youtube_api_key: str) -> dict:
     """
@@ -162,10 +175,33 @@ def fetch_transcript(video_id: str) -> str:
     Fetch the transcript for a YouTube video using YouTubeTranscriptApi.
     """
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript = YouTubeTranscriptApi.get_transcript(video_id,languages=['en'])
         return " ".join([entry['text'] for entry in transcript])
+    except NoTranscriptAvailable:
+        try:
+            # Fallback to Telugu if English is not available
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['te'])
+            telugu_transcript = " ".join([entry['text'] for entry in transcript])
+        except NoTranscriptAvailable:    
+            try:
+                # Fallback to Hindi if Telugu is not available
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['hi'])
+                return " ".join([entry['text'] for entry in transcript])
+            except NoTranscriptAvailable:
+                # Fallback to any available language (auto-generated)
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                for transcript in transcript_list:
+                    if transcript.is_generated:  # Check if it's auto-generated
+                        transcript_fetched = transcript.fetch()
+                        return " ".join([entry['text'] for entry in transcript_fetched])
+            except Exception as e:
+                st.error(f"No English, Telugu, or auto-generated transcript available for video {video_id}: {e}")
+                return None
+    except TranscriptsDisabled:
+        st.error(f"Transcripts are disabled for video {video_id}.")
+        return None
     except Exception as e:
-        st.error(f"Error fetching transcript: {e}")
+        st.error(f"Error fetching transcript for video {video_id}: {e}")
         return None
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def generate_questions_and_summary(transcript: str) -> dict:
@@ -229,25 +265,41 @@ def create_pdf_for_day(day: int, videos: list, transcripts_data: list) -> str:
         pdf.cell(0, 10, f"Video {idx}: {videos[idx-1]['title']}", ln=True)
         pdf.ln(5)
         
-        # Full transcript
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, "Transcript:", ln=True)
-        pdf.set_font("Arial", size=10)  # Corrected font setting
-        pdf.multi_cell(0, 5, data['transcript'])
-        pdf.ln(5)
+        # Full transcript (if available)
+        if data.get('transcript'):
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 10, "Transcript (Translated to English):", ln=True)
+            pdf.set_font("Arial", size=10)
+            pdf.multi_cell(0, 5, data['transcript'])
+            pdf.ln(5)
+        else:
+            pdf.set_font("Arial", "I", 10)
+            pdf.multi_cell(0, 5, "Transcript not available for this video.")
+            pdf.ln(5)
         
-        # Summary
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, "Summary:", ln=True)
-        pdf.set_font("Arial", size=10)  # Corrected font setting
-        pdf.multi_cell(0, 5, data.get('summary', 'Summary not available'))
-        pdf.ln(5)
+        # Summary (if available)
+        if data.get('summary'):
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 10, "Summary:", ln=True)
+            pdf.set_font("Arial", size=10)
+            pdf.multi_cell(0, 5, data['summary'])
+            pdf.ln(5)
+        else:
+            pdf.set_font("Arial", "I", 10)
+            pdf.multi_cell(0, 5, "Summary not available for this video.")
+            pdf.ln(5)
         
-        # Q&A
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, "Questions & Answers:", ln=True)
-        pdf.set_font("Arial", size=10)  # Corrected font setting
-        pdf.multi_cell(0, 5, data.get('qa', 'Q&A not available'))
+        # Q&A (if available)
+        if data.get('qa'):
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 10, "Questions & Answers:", ln=True)
+            pdf.set_font("Arial", size=10)
+            pdf.multi_cell(0, 5, data['qa'])
+            pdf.ln(5)
+        else:
+            pdf.set_font("Arial", "I", 10)
+            pdf.multi_cell(0, 5, "Q&A not available for this video.")
+            pdf.ln(5)
         
         # Add page break if not last item
         if idx != len(transcripts_data):
@@ -336,7 +388,8 @@ def calculate_current_day():
     if not st.session_state.start_date:
         return 1
     now = datetime.now(timezone.utc)
-    delta = now - st.session_state.start_date
+    start_date = st.session_state.start_date.replace(hour=0, minute=0, second=0, microsecond=0)  # Normalize start date to midnight
+    delta =now - start_date
     current_day = delta.days + 1  # Add 1 to make day 1 the start date
     return current_day
 
@@ -473,10 +526,11 @@ if st.session_state.user:
 
         # --- Step 3: Display Saved Daily Videos & Track Progress ---
         if st.session_state.saved_schedule:
-            show_progress_sidebar()
-
             # Calculate current day
             current_day = calculate_current_day()
+            show_progress_sidebar()
+
+            
             day_videos = st.session_state.saved_schedule.get(current_day, [])
             
             if day_videos:
